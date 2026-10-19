@@ -1,0 +1,103 @@
+"""
+Vehicle Accident Risk Prediction  (Problem 67, Section-409 A)
+Problem type : Binary classification  (0 = low risk / slight, 1 = high risk / serious or fatal)
+Algorithm    : Random Forest
+Metric       : Accuracy (plus confusion matrix, precision, recall for a fuller picture)
+
+Usage
+-----
+1) Quick demo (no download needed, uses synthetic data):
+       python accident_risk_prediction.py
+
+2) With the real Kaggle "Road Safety Data" (UK DfT) -- see README notes at the bottom:
+       python accident_risk_prediction.py --csv merged_road_safety.csv
+
+Install:  pip install pandas numpy scikit-learn matplotlib joblib
+"""
+import argparse
+import numpy as np
+import pandas as pd
+import joblib
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
+FEATURES = ["driver_age", "weather", "speed_limit"]   # input features from the project brief
+TARGET = "high_risk"
+WEATHER = {0: "Fine", 1: "Rain", 2: "Snow", 3: "Fog", 4: "High winds"}
+
+
+# ---------------------------------------------------------------- 1. DATA
+def make_synthetic(n=20000, seed=42):
+    """Synthetic data that mimics real-world patterns (for demo when no CSV is given)."""
+    rng = np.random.default_rng(seed)
+    age = rng.integers(17, 80, n)
+    weather = rng.choice(list(WEATHER), n, p=[0.70, 0.15, 0.04, 0.04, 0.07])
+    speed = rng.choice([20, 30, 40, 50, 60, 70], n, p=[0.05, 0.40, 0.12, 0.13, 0.20, 0.10])
+    # risk grows with speed, bad weather, and very young / very old drivers
+    score = (speed - 30) / 20 + np.where(weather > 0, 0.6, 0) + np.where(weather >= 2, 0.5, 0)
+    score += np.where(age < 25, 0.7, 0) + np.where(age > 70, 0.5, 0)
+    prob = 1 / (1 + np.exp(-(score - 1.6 + rng.normal(0, 0.8, n))))
+    return pd.DataFrame({"driver_age": age, "weather": weather, "speed_limit": speed,
+                         TARGET: (rng.random(n) < prob).astype(int)})
+
+
+def load_kaggle(path):
+    """Load the real dataset. Expected columns (rename here if yours differ):
+       Age_of_Driver, Weather_Conditions, Speed_limit, Accident_Severity (1=Fatal, 2=Serious, 3=Slight)"""
+    df = pd.read_csv(path)
+    df = df.rename(columns={"Age_of_Driver": "driver_age", "Weather_Conditions": "weather",
+                            "Speed_limit": "speed_limit"})
+    df = df[(df["driver_age"] > 0) & (df["weather"] > 0)]        # -1 = missing in this dataset
+    df[TARGET] = (df["Accident_Severity"] <= 2).astype(int)       # fatal or serious -> high risk
+    return df[FEATURES + [TARGET]].dropna()
+
+
+# ---------------------------------------------------------------- 2. MAIN PIPELINE
+def main(csv=None):
+    df = load_kaggle(csv) if csv else make_synthetic()
+    print(f"Rows: {len(df)} | High-risk share: {df[TARGET].mean():.1%}")
+
+    X, y = df[FEATURES], df[TARGET]
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    model = RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_leaf=5,
+                                   class_weight="balanced", random_state=42, n_jobs=-1)
+    model.fit(X_tr, y_tr)
+
+    pred = model.predict(X_te)
+    print(f"\nTest accuracy : {accuracy_score(y_te, pred):.3f}")
+    print(f"5-fold CV acc : {cross_val_score(model, X, y, cv=5).mean():.3f}")
+    print("\nConfusion matrix:\n", confusion_matrix(y_te, pred))
+    print("\n", classification_report(y_te, pred, target_names=["Low risk", "High risk"]))
+
+    imp = pd.Series(model.feature_importances_, index=FEATURES).sort_values()
+    print("Feature importance:\n", imp.round(3).to_string())
+    imp.plot.barh(title="Feature importance (Random Forest)", color="#d1495b")
+    plt.tight_layout(); plt.savefig("feature_importance.png", dpi=150); plt.close()
+
+    joblib.dump(model, "accident_risk_model.joblib")
+    print("\nSaved: accident_risk_model.joblib, feature_importance.png")
+
+    # ----------------------------------------------------- 3. PREDICT NEW CASES
+    demo = pd.DataFrame([[19, 2, 60], [45, 0, 30], [75, 3, 70]], columns=FEATURES)
+    for (_, r), p in zip(demo.iterrows(), model.predict_proba(demo)[:, 1]):
+        print(f"Age {int(r.driver_age)}, {WEATHER[int(r.weather)]}, {int(r.speed_limit)} mph "
+              f"-> risk {p:.0%} ({'HIGH' if p >= 0.5 else 'low'})")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", help="path to merged Kaggle road-safety CSV")
+    main(ap.parse_args().csv)
+
+# README NOTES -- using the real Kaggle data
+# Dataset: Kaggle "Road Safety Data" (UK Dept. for Transport, STATS19). It ships as separate files:
+#   Accident (Accident_Severity, Speed_limit, Weather_Conditions, Accident_Index)
+#   Vehicle  (Accident_Index, Age_of_Driver)
+# Merge them on Accident_Index and save as merged_road_safety.csv:
+#   acc = pd.read_csv("Accident.csv"); veh = pd.read_csv("Vehicle.csv")
+#   acc.merge(veh[["Accident_Index","Age_of_Driver"]], on="Accident_Index").to_csv("merged_road_safety.csv", index=False)
